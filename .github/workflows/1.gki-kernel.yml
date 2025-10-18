@@ -1,0 +1,110 @@
+name: Build GKI Kernel with Docker Support
+
+on:
+  workflow_dispatch:
+    inputs:
+      enable_docker:
+        description: 'Enable Docker Support'
+        type: boolean
+        default: false
+      kernel_config:
+        description: 'Kernel Configuration'
+        required: true
+        default: 'gki_defconfig'
+        type: string
+
+jobs:
+  build:
+    name: Build GKI Kernel
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Setup build environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          libncurses-dev \
+          bison \
+          flex \
+          libssl-dev \
+          libelf-dev \
+          bc \
+          git
+        
+    - name: Setup Docker integration
+      if: inputs.enable_docker
+      run: |
+        echo "设置 Docker 集成支持..."
+        chmod +x scripts/docker-integration.sh
+        
+    - name: Build kernel
+      run: |
+        echo "编译 GKI 内核..."
+        
+        # 设置编译环境
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        
+        # 使用原始配置
+        make ${{ github.event.inputs.kernel_config }}
+        
+        # 如果启用 Docker 支持，应用 Docker 配置
+        if [ "${{ github.event.inputs.enable_docker }}" = "true" ]; then
+          echo "应用 Docker 支持配置..."
+          ./scripts/docker-integration.sh apply
+          
+          # 重新生成配置依赖
+          make olddefconfig
+        fi
+        
+        # 编译内核
+        make -j$(nproc)
+        
+    - name: Validate Docker support
+      if: inputs.enable_docker
+      run: |
+        echo "验证 Docker 支持..."
+        ./scripts/docker-integration.sh validate
+        
+    - name: Generate build artifacts
+      run: |
+        echo "生成构建产物..."
+        mkdir -p artifacts
+        
+        # 复制内核镜像
+        cp arch/arm64/boot/Image artifacts/
+        cp arch/arm64/boot/Image.gz artifacts/
+        
+        # 复制配置文件
+        cp .config artifacts/kernel.config
+        
+    - name: Generate Docker support report
+      if: inputs.enable_docker
+      run: |
+        ./scripts/docker-integration.sh report
+        cp docker_support_report.txt artifacts/
+        
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: gki-kernel-${{ github.event.inputs.enable_docker && 'with-docker' || 'standard' }}
+        path: |
+          artifacts/
+          docker_support_report.txt
+        retention-days: 30
+        
+    - name: Notify build completion
+      run: |
+        echo "🎉 GKI 内核编译完成!"
+        if [ "${{ github.event.inputs.enable_docker }}" = "true" ]; then
+          echo "🐳 Docker 支持已启用"
+          echo "📋 验证报告: docker_support_report.txt"
+        else
+          echo "ℹ️ 标准 GKI 内核（未启用 Docker 支持）"
+        fi
