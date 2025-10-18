@@ -1,40 +1,125 @@
 #!/bin/bash
 
-# Docker支持配置脚本
-# 作者: Auto-generated for KernelSU with Docker Support
+# GKI Docker 集成脚本
+# 用于在现有 GKI 内核构建流程中添加 Docker 支持
 
 set -e
 
 KERNEL_DIR=$(pwd)
-CONFIG_DIR="$KERNEL_DIR/arch/arm64/configs"
-BACKUP_DIR="$KERNEL_DIR/config_backup"
-
-# 颜色输出
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+CONFIG_FILE=".config"
+DOCKER_CONFIG="$KERNEL_DIR/arch/arm64/configs/docker_gki_defconfig"
 
 log_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
+    echo "[DOCKER-INTEGRATION] INFO: $1"
 }
 
 log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
+    echo "[DOCKER-INTEGRATION] WARN: $1"
 }
 
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-# 备份原配置
-backup_config() {
-    local original_config=$1
-    if [ ! -f "$original_config" ]; then
-        log_error "原配置文件不存在: $original_config"
-        exit 1
+# 检查并应用 Docker 配置
+apply_docker_config() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+        log_warn "配置文件 $CONFIG_FILE 不存在，跳过 Docker 配置"
+        return 0
     fi
     
+    if [ ! -f "$DOCKER_CONFIG" ]; then
+        log_warn "Docker 配置文件 $DOCKER_CONFIG 不存在"
+        return 0
+    fi
+    
+    log_info "应用 Docker 支持配置..."
+    
+    # 读取 Docker 配置并应用到当前配置
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^CONFIG_ ]] && [[ ! "$line" =~ ^# ]]; then
+            config_name=$(echo "$line" | cut -d'=' -f1)
+            config_value=$(echo "$line" | cut -d'=' -f2)
+            
+            # 检查配置是否已存在
+            if grep -q "^$config_name=" "$CONFIG_FILE"; then
+                # 配置已存在，更新它
+                sed -i "s/^$config_name=.*/$line/" "$CONFIG_FILE"
+            else
+                # 配置不存在，添加它
+                echo "$line" >> "$CONFIG_FILE"
+            fi
+        fi
+    done < "$DOCKER_CONFIG"
+    
+    log_info "Docker 配置应用完成"
+}
+
+# 验证 Docker 配置
+validate_docker_config() {
+    log_info "验证 Docker 关键配置..."
+    
+    local critical_configs=(
+        "CONFIG_NAMESPACES"
+        "CONFIG_CGROUPS" 
+        "CONFIG_USER_NS"
+        "CONFIG_OVERLAY_FS"
+        "CONFIG_VETH"
+    )
+    
+    local missing_configs=()
+    
+    for config in "${critical_configs[@]}"; do
+        if ! grep -q "^$config=y" "$CONFIG_FILE"; then
+            missing_configs+=("$config")
+        fi
+    done
+    
+    if [ ${#missing_configs[@]} -ne 0 ]; then
+        log_warn "以下关键 Docker 配置未启用: ${missing_configs[*]}"
+        return 1
+    else
+        log_info "所有关键 Docker 配置已启用"
+        return 0
+    fi
+}
+
+# 生成配置报告
+generate_docker_report() {
+    local report_file="$KERNEL_DIR/docker_support_report.txt"
+    
+    cat > "$report_file" << EOF
+Docker 支持配置报告
+生成时间: $(date)
+内核版本: $(make kernelversion 2>/dev/null || echo "未知")
+
+关键配置状态:
+命名空间: $(grep -q "^CONFIG_NAMESPACES=y" "$CONFIG_FILE" && echo "已启用" || echo "未启用")
+用户命名空间: $(grep -q "^CONFIG_USER_NS=y" "$CONFIG_FILE" && echo "已启用" || echo "未启用")
+CGroup: $(grep -q "^CONFIG_CGROUPS=y" "$CONFIG_FILE" && echo "已启用" || echo "未启用")
+OverlayFS: $(grep -q "^CONFIG_OVERLAY_FS=y" "$CONFIG_FILE" && echo "已启用" || echo "未启用")
+网络命名空间: $(grep -q "^CONFIG_NET_NS=y" "$CONFIG_FILE" && echo "已启用" || echo "未启用")
+
+已启用的 Docker 相关配置:
+$(grep -E "^CONFIG_(NAMESPACES|CGROUPS|USER_NS|OVERLAY|VETH|BRIDGE)=y" "$CONFIG_FILE")
+
+EOF
+
+    log_info "Docker 支持报告已生成: $report_file"
+}
+
+case "${1:-}" in
+    "apply")
+        apply_docker_config
+        ;;
+    "validate")
+        validate_docker_config
+        ;;
+    "report")
+        generate_docker_report
+        ;;
+    *)
+        apply_docker_config
+        validate_docker_config
+        generate_docker_report
+        ;;
+esac    
     mkdir -p "$BACKUP_DIR"
     local backup_file="$BACKUP_DIR/$(basename $original_config).backup.$(date +%Y%m%d_%H%M%S)"
     cp "$original_config" "$backup_file"
